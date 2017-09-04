@@ -20,6 +20,7 @@ module Hetzner
         attr_accessor :post_install
         attr_accessor :post_install_remote
         attr_accessor :public_keys
+        attr_accessor :drive
         attr_accessor :bootstrap_cmd
         attr_accessor :logger
 
@@ -27,8 +28,9 @@ module Hetzner
           @rescue_os     = 'linux'
           @rescue_os_bit = '64'
           @retries       = 0
-          @bootstrap_cmd = 'export TERM=xterm; /tmp/coreos-install -d /dev/sda -C stable -c /tmp/cloud-config.yaml'
           @login         = 'root'
+          @drive         = options[:drive] ? options[:drive] : '/dev/sda'
+          @bootstrap_cmd = "export TERM=xterm; /tmp/coreos-install -d #{@drive} -C stable -i /tmp/ignition.json"
 
           if cc = options.delete(:cloud_config)
             @cloud_config = CloudConfig.new cc
@@ -124,7 +126,10 @@ module Hetzner
               f.puts cloud_config
             end
             ssh.exec! "wget https://raw.githubusercontent.com/coreos/init/master/bin/coreos-install -P /tmp"
+            ssh.exec! "wget https://github.com/coreos/container-linux-config-transpiler/releases/download/v0.4.2/ct-v0.4.2-x86_64-unknown-linux-gnu -O /tmp/ct"
             ssh.exec! "chmod a+x /tmp/coreos-install"
+            ssh.exec! "chmod a+x /tmp/ct"
+            ssh.exec! "/tmp/ct < /tmp/cloud-config.yaml > /tmp/ignition.json"
             logger.info "Remote executing: #{@bootstrap_cmd}".colorize(:magenta)
             output = ssh.exec!(@bootstrap_cmd)
             logger.info output
@@ -199,6 +204,7 @@ module Hetzner
           params[:hostname] = @hostname
           params[:ip] = @ip
           params[:public_keys] = @public_keys
+          params[:discovery_url] = @discovery_url
 
           return eruby.result(params)
         end
@@ -219,13 +225,17 @@ module Hetzner
           @api = api_obj
         end
 
+        def use_discovery_url(discovery_url)
+          @discovery_url = discovery_url
+        end
+
         def use_logger(logger_obj)
           @logger = logger_obj
           @logger.formatter = default_log_formatter
         end
 
         def remote(options = {}, &block)
-          default = { :password => @password }
+          default = { :password => @password, :keys => [ @public_keys ] }
           default.merge! options
           Net::SSH.start(@ip, @login, default) do |ssh|
             block.call ssh
