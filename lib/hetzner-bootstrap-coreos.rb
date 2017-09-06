@@ -14,6 +14,7 @@ module Hetzner
       attr_accessor :actions
       attr_accessor :logger
       attr_accessor :discovery_url
+      attr_accessor :docker_swarm
 
       def initialize(options = {})
         @targets = []
@@ -31,11 +32,14 @@ module Hetzner
             update_local_known_hosts
             remove_from_local_known_hosts
             verify_installation
+            configure_route
+            docker_swarm
             post_install
             post_install_remote
         )
         @api = options[:api]
         @discovery_url = get_discovery_url
+        @docker_swarm = options[:docker_swarm] ? :docker_swarm : false
       end
 
       def add_target(param)
@@ -58,19 +62,52 @@ module Hetzner
         logger = Logger.new(STDOUT)
         logger.info "#{sprintf "%-20s", "START"}"
 
-        threads = @targets.map do |target|
-          Thread.new {
-            target.use_api @api
-            target.use_logger options[:logger] || Logger.new(STDOUT)
-            target.use_discovery_url @discovery_url
-            bootstrap_one_target! target
-          }
+        manager = false
+        workers = []
+        join_token = ''
+        join_address = ''
+
+        if @docker_swarm
+          logger.info "#{sprintf "%-20s", "Using Docker Swarm"}"
+
+          @targets.each do |target|
+            if target.manager? && !manager
+              manager = target
+            else
+              workers.push(target)
+            end
+          end
+
+          thread = start_thread(manager, options)
+          thread.join()
+          join_token = thread['join_token']
+          join_address = manager.ip + ':2377'
+        else
+          workers = @targets
         end
 
+        threads = workers.map do |target|
+          if @docker_swarm
+            target.use_join_token join_token
+            target.use_join_address join_address
+          end
+
+          start_thread(target, options)
+        end
         threads.each(&:join)
 
         logger.info "#{sprintf "%-20s", "DONE!"}"
         logger.info "#{sprintf "%-20s", "Discovery URL #{@discovery_url}"}"
+      end
+
+      def start_thread(target, options = {})
+        Thread.new {
+          target.use_api @api
+          target.use_logger options[:logger] || Logger.new(STDOUT)
+          target.use_discovery_url @discovery_url
+          target.use_docker_swarm @docker_swarm
+          bootstrap_one_target! target
+        }
       end
 
       def bootstrap_one_target!(target)

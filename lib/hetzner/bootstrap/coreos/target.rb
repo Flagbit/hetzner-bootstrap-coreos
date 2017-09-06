@@ -22,20 +22,36 @@ module Hetzner
         attr_accessor :public_keys
         attr_accessor :drive
         attr_accessor :bootstrap_cmd
+        attr_accessor :channel
         attr_accessor :logger
+        attr_accessor :manager
+        attr_accessor :docker_swarm
+        attr_accessor :join_token
+        attr_accessor :route_cmd
 
         def initialize(options = {})
           @rescue_os     = 'linux'
           @rescue_os_bit = '64'
           @retries       = 0
           @login         = 'root'
+          @manager       = false
           @drive         = options[:drive] ? options[:drive] : '/dev/sda'
-          @bootstrap_cmd = "export TERM=xterm; /tmp/coreos-install -d #{@drive} -C stable -i /tmp/ignition.json"
+          @channel         = options[:channel] ? options[:channel] : 'stable'
+          @bootstrap_cmd = "export TERM=xterm; /tmp/coreos-install -d #{@drive} -C #{@channel} -i /tmp/ignition.json"
+          @route_cmd     = options[:route_cmd] ? options[:route_cmd] : false
 
           if cc = options.delete(:cloud_config)
             @cloud_config = CloudConfig.new cc
           else
             raise NoCloudConfigProvidedError.new 'No cloud config file provided.'
+          end
+
+          if options[:docker_swarm]
+            use_docker_swarm(:docker_swarm)
+          end
+
+          if options[:join_token]
+            use_join_token(:join_token)
           end
 
           options.each_pair do |k,v|
@@ -84,6 +100,10 @@ module Hetzner
           IO.select([ssh_port_probe], nil, nil, 2)
           ssh_port_probe.close
           true
+        end
+
+        def manager?
+          @manager
         end
 
         def wait_for_ssh_down(options = {})
@@ -136,6 +156,16 @@ module Hetzner
           end
         end
 
+        def configure_route
+          if @route_cmd
+            remote do |ssh|
+              logger.info "Remote executing: #{@route_cmd}".colorize(:magenta)
+              output = ssh.exec!(@route_cmd)
+              logger.info output
+            end
+          end
+        end
+
         def reboot(options = {})
           logger.info "Rebooting ...".colorize(:magenta)
           remote do |ssh|
@@ -170,6 +200,34 @@ module Hetzner
         rescue Net::SSH::HostKeyMismatch => e
           e.remember_host!
           logger.info "Remote host key has been added to local ~/.ssh/known_hosts file.".colorize(:green)
+        end
+
+        def docker_swarm
+          if @docker_swarm
+            if manager?
+              remote do |ssh|
+                cmd = 'docker swarm init'
+                logger.info "executing #{cmd}".colorize(:magenta)
+                ssh.exec!(cmd)
+
+                cmd = 'docker swarm join-token worker -q'
+                logger.info "executing #{cmd}".colorize(:magenta)
+                join_token = ssh.exec!(cmd)
+                join_token.chomp!
+
+                logger.info "got join token #{join_token}".colorize(:magenta)
+
+                Thread.current['manager'] = true;
+                Thread.current['join_token'] = join_token;
+              end
+            else
+              remote do |ssh|
+                cmd = "docker swarm join --token #{@join_token} #{@join_address}"
+                logger.info "executing #{cmd}".colorize(:magenta)
+                ssh.exec!(cmd)
+              end
+            end
+          end
         end
 
         def post_install(options = {})
@@ -227,6 +285,18 @@ module Hetzner
 
         def use_discovery_url(discovery_url)
           @discovery_url = discovery_url
+        end
+
+        def use_docker_swarm(docker_swarm)
+          @docker_swarm = docker_swarm
+        end
+
+        def use_join_token(join_token)
+          @join_token = join_token
+        end
+
+        def use_join_address(join_address)
+          @join_address = join_address
         end
 
         def use_logger(logger_obj)
